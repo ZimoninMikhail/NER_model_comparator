@@ -1,0 +1,33 @@
+model:
+  name: "DeepPavlov/rubert-base-cased"
+  num_labels: 16
+
+training:
+  batch_size: 8
+  learning_rate: 2e-5
+  num_epochs: 3
+  warmup_steps: 500
+  weight_decay: 0.01
+  save_steps: 1000
+  eval_steps: 500
+  logging_steps: 100
+
+data:
+  geo_types:
+    - COUNTRY
+    - CITY
+    - LOCATION
+    - STATE_OR_PROV
+    - DISTRICT
+  min_consistency: 0.95
+  min_entities_per_doc: 1
+  max_seq_length: 512
+
+visualization:
+  output_format: "html"
+  save_plots: true
+  max_examples_in_report: 5
+
+monitoring:
+  log_level: "INFO"
+  save_predictions: true
