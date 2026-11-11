@@ -63,7 +63,7 @@ class ModelRegistry:
         
         Args:
             model_path: Путь к папке с модельой
-            metrics: Метрики модели (precision, recall, f1)
+            metrics: Явные entity-level macro_f1, micro_f1 и показатели по типам
             metadata: Дополнительные метаданные
             
         Returns:
@@ -96,12 +96,10 @@ class ModelRegistry:
         
         print(f"Модель зарегистрирована: {version}")
         if metrics:
-            f1 = metrics.get('f1', 'N/A')
-            if isinstance(f1, (float, int)):
-                print(f"  f1: {f1:.4f}")
-            else:
-                print(f"  f1: {f1}")
-        
+            for key in ('macro_f1', 'micro_f1'):
+                if key in metrics:
+                    print(f"  {key}: {metrics[key]:.4f}")
+
         return version
     
     def update_metrics(self, version: str, metrics: Dict[str, Any]) -> bool:
@@ -111,8 +109,9 @@ class ModelRegistry:
                 self.registry['versions'][i]['metrics'] = metrics
                 self._save_registry()
                 print(f"Метрики обновлены для версии: {version}")
-                if metrics.get('f1'):
-                    print(f"  f1: {metrics['f1']:.4f}")
+                for key in ('macro_f1', 'micro_f1'):
+                    if key in metrics:
+                        print(f"  {key}: {metrics[key]:.4f}")
                 return True
         print(f"Версия {version} не найдена")
         return False

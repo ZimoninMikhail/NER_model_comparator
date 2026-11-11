@@ -1,33 +1,39 @@
+dataset: nerel
+seed: 42
+device: auto
 model:
-  name: "DeepPavlov/rubert-base-cased"
-  num_labels: 16
-
+  name: DeepPavlov/rubert-base-cased
+  architecture: bert
 training:
-  batch_size: 8
-  learning_rate: 2e-5
+  batch_size: 2
+  learning_rate: 2.0e-05
   num_epochs: 3
   warmup_steps: 500
   weight_decay: 0.01
-  save_steps: 1000
-  eval_steps: 500
   logging_steps: 100
-
 data:
-  geo_types:
-    - COUNTRY
-    - CITY
-    - LOCATION
-    - STATE_OR_PROV
-    - DISTRICT
-  min_consistency: 0.95
-  min_entities_per_doc: 1
+  batch_size: 32
   max_seq_length: 512
-
+annotation_policy:
+  overlap: longest_first
+  same_span_priority: train_frequency_ascending
+  final_tie: alphabetical
+  discontinuous: exclude
+evaluation:
+  primary_metric: macro_f1
+  match: exact_span_and_type
+paths:
+  raw: data/raw
+  processed: data/processed
+  prepared: data/prepared
+  models: data/models
+  predictions: data/predictions
+  reports: reports
+  visualization: reports/visualization
 visualization:
-  output_format: "html"
+  output_format: html
   save_plots: true
   max_examples_in_report: 5
-
-monitoring:
-  log_level: "INFO"
-  save_predictions: true
+benchmark:
+  warmup_runs: 2
+  repeats: 5

@@ -1,0 +1,43 @@
+data:
+  dataset_id: nerel
+  dataset_name: NEREL
+  dataset_version: '1.1'
+  dataset_revision: 8f07d3e410f322d5dbf6b68b13fbf4a4aa077fe9
+  source:
+    format: brat
+    path: data/sources/nerel-1.1
+    repository: https://github.com/nerel-ds/NEREL
+    commit: 8f07d3e410f322d5dbf6b68b13fbf4a4aa077fe9
+    subdirectory: NEREL-v1.1
+  entity_types:
+  - AGE
+  - AWARD
+  - CITY
+  - COUNTRY
+  - CRIME
+  - DATE
+  - DISEASE
+  - DISTRICT
+  - EVENT
+  - FACILITY
+  - FAMILY
+  - IDEOLOGY
+  - LANGUAGE
+  - LAW
+  - LOCATION
+  - MONEY
+  - NATIONALITY
+  - NUMBER
+  - ORDINAL
+  - ORGANIZATION
+  - PENALTY
+  - PERCENT
+  - PERSON
+  - PRODUCT
+  - PROFESSION
+  - RELIGION
+  - STATE_OR_PROVINCE
+  - TIME
+  - WORK_OF_ART
+  type_priority_path: data/priorities/nerel-1.1_v3.json
+  corrections_path: config/nerel_annotation_corrections.yaml

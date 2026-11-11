@@ -1,0 +1,30 @@
+version: 1
+dataset_name: iluvvatar/NEREL
+verified_on: '2026-10-29'
+source_commit: 8f07d3e410f322d5dbf6b68b13fbf4a4aa077fe9
+text_hash_rule: sha256_utf8_nbsp_to_space
+corrections:
+- id: 139972_text_T73_end_plus_one
+  source_document: 139972_text
+  entity_id: T73
+  text_sha256: 0d0f2e6a306a90e34ffd4f82b447ebd26cb0934098261a7731b98bad42a884a7
+  before: "T73\tORGANIZATION 1637 1668\tсочинского Художественного музе"
+  after: "T73\tORGANIZATION 1637 1669\tсочинского Художественного музея"
+  reason: Граница обрывала последнее слово перед последней буквой; включена последняя
+    буква слова.
+  source_url: https://github.com/nerel-ds/NEREL/blob/8f07d3e410f322d5dbf6b68b13fbf4a4aa077fe9/NEREL-v1.1/train/139972_text.ann
+  verified_versions:
+  - '1.0'
+  - '1.1'
+- id: 19528_text_T14_end_plus_one
+  source_document: 19528_text
+  entity_id: T14
+  text_sha256: f67f404aaf2f817f29ee4024c88d077ddb522028afc8ff41d6bf96dd2ac327cd
+  before: "T14\tTIME 447 465\tв 16 часов 25 мину"
+  after: "T14\tTIME 447 466\tв 16 часов 25 минут"
+  reason: Граница обрывала последнее слово перед последней буквой; включена последняя
+    буква слова.
+  source_url: https://github.com/nerel-ds/NEREL/blob/8f07d3e410f322d5dbf6b68b13fbf4a4aa077fe9/NEREL-v1.1/train/19528_text.ann
+  verified_versions:
+  - '1.0'
+  - '1.1'

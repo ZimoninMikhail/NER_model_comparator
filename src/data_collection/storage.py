@@ -21,7 +21,7 @@ class RawDataStorage:
     
     def _get_timestamp(self) -> str:
         """Возвращает текущий timestamp в формате YYYYMMDD_HHMMSS_mmm."""
-        return datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]
+        return datetime.now().strftime("%Y%m%d_%H%M%S_%f")
     
     def save_batch(
         self, 
@@ -68,8 +68,13 @@ class RawDataStorage:
                 'text': doc.get('text', ''),
                 'entities': doc.get('entities', ''),
                 'doc_id': doc.get('doc_id', i),
-                'batch_id': doc.get('batch_id', full_metadata["batch_id"])
+                'batch_id': doc.get('batch_id', full_metadata["batch_id"]),
+                'split': doc.get('split'),
+                'source_doc_id': doc.get('source_doc_id')
             }
+            for key in ('dataset_id', 'source_commit', 'source_files', 'source_annotations'):
+                if key in doc:
+                    doc_to_save[key] = doc[key]
             with open(doc_path, 'w', encoding='utf-8') as f:
                 json.dump(doc_to_save, f, indent=2, ensure_ascii=False)
         

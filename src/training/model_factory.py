@@ -1,9 +1,7 @@
-"""
-Модуль для создания модели BERT для NER.
-"""
-
-from transformers import AutoModelForTokenClassification
-import torch
+"""Выбор архитектуры и устройства. Реализации находятся в src.models."""
+from torch.nn import Module
+from src.device import resolve_device
+from src.models import bert
 
 
 def create_model(
@@ -11,31 +9,31 @@ def create_model(
     num_labels: int,
     label2id: dict = None,
     id2label: dict = None,
-    device: str = "cpu"
-) -> AutoModelForTokenClassification:
-    """
-    Создаёт модель BERT для токеновой классификации (NER).
-    
-    Args:
-        model_name: Название модели на Hugging Face
-        num_labels: Количество классов
-        label2id: Маппинг метка → ID
-        id2label: Маппинг ID → метка
-        device: Устройство ("cpu" или "cuda")
-        
-    Returns:
-        Модель BERT для NER
-    """
+    device: str = "auto",
+    architecture: str = 'bert',
+    model_parameters=None,
+    vocab_size=None,
+    padding_idx=0,
+    special_token_ids=(),
+    tokenizer_name=None,
+    max_seq_length=512
+) -> Module:
+    """Создать выбранную архитектуру через её модуль и перенести на устройство."""
+    device = resolve_device(device)
     print(f"Создание модели: {model_name}")
     print(f"  num_labels: {num_labels}")
     
-    model = AutoModelForTokenClassification.from_pretrained(
-        model_name,
-        num_labels=num_labels,
-        label2id=label2id,
-        id2label=id2label
-    )
-    
+    if architecture == 'bilstm_crf':
+        from src.models import bilstm_crf
+        model = bilstm_crf.create_model(num_labels=num_labels, vocab_size=vocab_size,
+            label2id=label2id, id2label=id2label, model_parameters=model_parameters,
+            padding_idx=padding_idx, special_token_ids=special_token_ids,
+            tokenizer_name=tokenizer_name, max_seq_length=max_seq_length)
+    elif architecture == 'bert':
+        model = bert.create_model(model_name, num_labels, label2id, id2label)
+    else:
+        raise ValueError(f'Неизвестная архитектура: {architecture}')
+
     model.to(device)
     print(f"  device: {device}")
     print(f"  параметров: {sum(p.numel() for p in model.parameters()):,}")
@@ -43,18 +41,6 @@ def create_model(
     return model
 
 
-def get_device() -> str:
-    """
-    Определяет доступное устройство.
-    
-    Returns:
-        "cuda" если GPU доступен, иначе "cpu"
-    """
-    if torch.cuda.is_available():
-        device = "cuda"
-        print(f"GPU доступен: {torch.cuda.get_device_name(0)}")
-    else:
-        device = "cpu"
-        print("GPU не найден, используем CPU")
-    
-    return device
+def get_device(requested='auto') -> str:
+    """Совместимый интерфейс к общему выбору CPU/CUDA."""
+    return resolve_device(requested)

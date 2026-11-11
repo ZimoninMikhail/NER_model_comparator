@@ -1,294 +1,98 @@
-# NER MLOps Pipeline
-Проект автоматизации и визуализации решения задачи распознавания именованных сущностей 
+# Сравнение моделей NER для русского языка
 
-Датасеты: NEREL
-
-Модели: BERT
-
-## Автор
-Зимонин Михаил Юрьевич
-
-@Hahahaha_mz
-
-## Датасет
-- **Название:** NEREL (iluvvatar/NEREL)
-- **Источник:** Hugging Face
-- **Задача:** Распознавание именованных сущностей (NER)
-- **Целевые типы:** Географические сущности (COUNTRY, CITY, LOCATION, STATE_OR_PROV, DISTRICT)
-
-## Модели
-- **Базовая модель для дообучения:** BERT (DeepPavlov/rubert-base-cased)
----
-
-## Структура проекта
-```
-.
-├── config
-│   └── config.yaml
-├── data
-│   ├── models
-│   ├── predictions
-│   ├── prepared
-│   ├── processed
-│   └── raw
-├── inference_data
-│   └── test_texts.txt
-├── README.md
-├── reports
-│   ├── monitoring
-│   ├── summary
-│   ├── training
-│   ├── validation
-│   └── visualization
-│       ├── html
-│       └── plots
-├── requirements.txt
-├── run.py
-├── src
-│   ├── data_analysis
-│   ├── data_collection
-│   ├── data_preparation
-│   ├── inference
-│   ├── training
-│   ├── validation
-│   └── visualization
-├── tests
-│   ├── test_data_analysis
-│   ├── test_data_collection
-│   ├── test_data_preparation
-│   ├── test_inference
-│   ├── test_training
-│   └── test_validation
-```
----
-## Этапы конвейера
-
-| Этап | Название |
-|------|----------|
-| 1	| Сбор данных |
-| 2	| Анализ данных |
-| 3	| Подготовка данных |
-| 4	| Обучение модели |
-| 5	| Валидация модели |
-| 6	| Инференс модели |
-| 7	| Визуализация |
----
-
-## Этап 1: Сбор данных (завершён)
-
-### Что реализовано
-- Загрузка датасета с Hugging Face
-- Эмуляция потокового чтения (разбиение на батчи)
-- Перемешивание данных (с возможностью установки seed для воспроизводимости)
-- Сохранение сырых данных в `data/raw/`
-- Расчёт базовых метапараметров
-
-### Структура `data/raw/`
-```
-data/raw/
-└── batch_20260323_141046_481/
-    ├── metadata.json      # метаданные батча
-    ├── doc_0000.json      # документ 1
-    ├── doc_0001.json      # документ 2
-    └── ...
-```
-
----
-
-## Этап 2: Анализ данных
-
-### Что реализовано
-- Парсинг сущностей из формата NEREL в структурированный вид (поддержка множественных интервалов)
-- Фильтрация по географическим типам (COUNTRY, CITY, LOCATION, STATE_OR_PROV, DISTRICT)
-- Проверка консистентности сущностей (сравнение текста по индексам)
-- Фильтрация документов по порогам качества:
-  - Минимальная доля консистентных сущностей (0.95)
-  - Минимальное количество сущностей в документе (1)
-- Сохранение обработанных данных в `data/processed/`
-- Накопление метаданных (статистика фильтрации, качество)
-
-### Структура `data/processed/`
-```
-data/processed/
-└── batch_20260417_212124_602/
-    ├── metadata.json      # метаданные с полной статистикой
-    ├── doc_0000.json      # документ с parsed_entities и quality
-    ├── doc_0001.json
-    └── ...
-```
-
----
-
-## Этап 3: Подготовка данных
-
-### Что реализовано
-- Загрузка токенизатора BERT (DeepPavlov/rubert-base-cased)
-- Токенизация текстов документов
-- Генерация BIO-меток для каждого токена
-- Преобразование в тензоры PyTorch с паддингом
-- Сохранение подготовленных данных в `data/prepared/`
-
-### Структура `data/prepared/`
-```
-data/prepared/
-└── batch_20260417_214849_168/
-    ├── tensors.pt         # тензоры input_ids, attention_mask, labels
-    ├── metadata.json      # метаданные батча
-    └── dataset_info.json  # label2id, id2label, num_labels
-```
-
-## Этап 4: Обучение модели
-
-### Что реализовано
-- Создание модели BERT для токеновой классификации (BertForTokenClassification)
-- Автоматическое определение устройства (CPU/GPU)
-- Настройка гиперпараметров обучения (эпохи, batch size, learning rate)
-- Обучение на подготовленных данных из `data/prepared/`
-- Сохранение обученной модели с версионированием в `data/models/`
-- Регистрация модели с метаданными (версия, timestamp, источник данных)
-
-### Структура `data/models/`
-```
-data/models/
-├── v20260417_222927_383/
-│   ├── config.json                # конфигурация модели
-│   ├── model.safetensors          # веса модели
-│   ├── training_metadata.json     # параметры обучения
-│   └── ...
-└── registry.json                  # реестр всех версий моделей
-```
-
-### Параметры обучения (по умолчанию)
-| Параметр | Значение |
-|----------|----------|
-| Количество эпох | 1 |
-| Размер батча | 4 |
-| Скорость обучения | 2e-5 |
-| Оптимизатор | AdamW |
-
----
-
-## Этап 5: Валидация модели
-
-### Что реализовано
-- Загрузка обученной модели из реестра версий
-- Расчёт метрик качества NER (precision, recall, f1, accuracy)
-- Валидация на подготовленных данных из `data/prepared/`
-- Обновление метрик в реестре моделей
-- Обработка numpy типов для JSON-сериализации
-
-### Структура `src/validation/`
-```
-src/validation/
-├── __init__.py
-├── metrics.py           # расчёт метрик NER
-├── validator.py         # класс для валидации модели
-└── model_registry.py    # реестр версий моделей (общий для этапов 4-5)
-```
-
-### Метрики валидации
-| Метрика | Описание |
-|---------|----------|
-| Accuracy | Доля правильно предсказанных токенов |
-| Precision | Точность модели (доля правильных предсказаний среди всех предсказаний) |
-| Recall | Полнота модели (доля найденных сущностей среди всех) |
-| F1-score | Гармоническое среднее precision и recall |
-
-## Этап 6: Инференс модели
-
-### Что реализовано
-- Загрузка модели из реестра по версии или последней
-- Токенизация входного текста
-- Предсказание сущностей с возвратом позиций в тексте
-- Пакетная обработка нескольких текстов
-- Сохранение результатов в JSON
-
-### Модули `src/inference/`
-| Модуль | Назначение |
-|--------|------------|
-| `model_loader.py` | Загрузка модели из реестра версий |
-| `predictor.py` | Инференс на одном или нескольких текстах |
-| `inference_pipeline.py` | Унифицированный пайплайн инференса |
-
-
-## Этап 7: Визуализация
-
-### Что реализовано
-- Графики распределения сущностей по типам
-- Графики метрик модели (precision, recall, f1)
-- Кривые обучения (loss по шагам)
-- Сравнение версий моделей
-- Графики производительности инференса
-- Подсветка сущностей в консоли (ANSI) и HTML
-- Единый HTML-дашборд для сбора всех компонентов
-
-### Модули `src/visualization/`
-| Модуль | Назначение |
-|--------|------------|
-| `visualizer.py` | Все методы визуализации |
-```
-reports/visualization/
-├── plots/          # PNG-графики
-└── html/           # HTML-отчёты и дашборды
-```
-
----
-
-## Режимы работы
-
-Система поддерживает 4 режима работы через командную строку:
-
-```bash
-# 1. Обучение/дообучение модели
-python run.py -m update
-
-# 2. Применение модели к новым данным (инференс)
-python run.py -m inference -f ./inference_data/texts.txt
-
-# 3. Генерация отчёта о работе системы
-python run.py -m summary
-
-# 4. Бенчмаркинг производительности
-python run.py -m benchmark
-```
-
-### Флаги визуализации
-| Флаг | Режимы | Назначение |
-| -p, --plots | update, inference, summary | График распределения сущностей |
-| -l, --loss | update | Кривая обучения |
-| -mt, --metrics | update, summary | Метрики precision/recall/f1 |
-| -c, --compare | summary | Сравнение версий моделей |
-| -b, --bench | benchmark | График производительности |
-| -hi, --highlight | inference | Подсветка сущностей |
-| -o, --open | Все с визуализацией | Открыть дашборд в браузере |
-| -f, --file | inference, benchmark | Путь к файлу |
-| -t, --text | inference | Отдельный текст для обработки |
-
-
-### Возвращаемые значения
-
-| Режим | Возвращает |
-|-------|------------|
-| `update` | `True` (успешно) или `False` (ошибка) |
-| `inference` | Путь к JSON-файлу с предсказаниями |
-| `summary` | Путь к JSON-файлу с отчётом |
-| `benchmark` | Словарь с метриками производительности |
+ruBERT, BiLSTM-CRF и GLiNER без дообучения. Датасеты: NEREL и NEREL-BIO.
+Основная метрика — macro-F1 по точному совпадению границ и типа сущности.
 
 ## Установка
 
-### Требования
-- Python 3.9+
-- Зависимости из `requirements.txt`
----
+Python 3.9. Зависимости закреплены в `requirements.txt`.
 
-## Известные ограничения
+```bash
+conda create -n Sci_env python=3.9
+conda activate Sci_env
+python -m pip install -r requirements.txt
+```
+## Данные
 
-- Версия `datasets` зафиксирована на 2.14.0 из-за формата NEREL (dataset scripts)
-- Поддерживаются множественные интервалы сущностей (формат `EVENT 895 909;947 957`)
+[NEREL](https://github.com/nerel-ds/NEREL) или
+[NEREL-BIO](https://github.com/nerel-ds/NEREL-BIO).
+Версия, commit и путь указаны в `config/datasets/`.
+Локальная копия должна содержать `train/`, `dev/`, `test/` с парами `.txt/.ann`,
+`annotation.conf` и `SOURCE_COMMIT.txt` с полным SHA commit.
 
----
+```bash
+python run.py -m type-statistics --dataset nerel
+python run.py -m prepare --dataset nerel
+```
 
-## Ссылки
+## Обучение
 
-- Датасет: https://huggingface.co/datasets/iluvvatar/NEREL
-- Модель: https://huggingface.co/DeepPavlov/rubert-base-cased
+```bash
+# ruBERT
+python run.py -m train --dataset nerel --dataset-version DATA_ID \
+  --config config/config.yaml --device cpu -l -mt -p
+
+# BiLSTM-CRF
+python run.py -m train --dataset nerel --dataset-version DATA_ID \
+  --config config/bilstm_crf.yaml --device cpu -l -mt -p
+```
+
+Для GPU доступна замена `--device cpu` на `--device cuda`.
+Модели сохраняются в `data/models/`, лучший checkpoint выбирается по dev.
+
+## Инференс
+
+```bash
+python run.py -m inference --model-version MODEL_ID --device cpu \
+  -t "Иван живёт в Москве." -hi
+```
+
+Для GLiNER требуется локальный комплект готовой модели:
+
+```python
+from src.models.gliner import load_model
+
+model = load_model("urchade/gliner_multi-v2.1", device="cpu",
+                   local_files_only=False,
+                   revision="443d26d654e0324125a96bebd8e796c14ff2efe6",
+                   cache_dir="data/pretrained/cache")
+model.save_pretrained("data/pretrained/gliner_multi-v2.1", safe_serialization=True)
+```
+
+```bash
+python run.py -m inference --config config/gliner.yaml --device cpu \
+  -t "Иван живёт в Москве." -hi
+```
+
+Типы и порог GLiNER задаются в `config/gliner.yaml`.
+
+## Оценка и скорость
+
+```bash
+# BiLSTM-CRF: конфиг config/bilstm_crf.yaml и соответствующий MODEL_ID
+python run.py -m evaluate --dataset nerel --config config/config.yaml \
+  --dataset-version DATA_ID --model-version MODEL_ID --split test --device cpu -mt
+
+python run.py -m evaluate --dataset nerel --config config/gliner.yaml \
+  --dataset-version DATA_ID --split test --device cpu -mt
+
+python run.py -m benchmark --model-version MODEL_ID --device cpu \
+  -f inference_data/test_texts.txt --warmup 2 --repeats 5 -b
+
+# GLiNER: параметр --config config/gliner.yaml вместо --model-version MODEL_ID
+python run.py -m summary -mt -c
+```
+
+Сравнение скорости проводится на одинаковых текстах и устройстве.
+Длинные документы разбиваются на неперекрывающиеся фрагменты;
+сущности на границах могут распознаваться частично.
+Данные и веса хранятся в `data/`, отчёты — в `reports/`. Оба каталога исключены из Git.
+
+## Тесты
+
+```bash
+python -m pip install pytest
+python -B -m pytest tests -q
+```
+
+Все параметры CLI: `python run.py --help`.

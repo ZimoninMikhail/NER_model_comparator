@@ -6,23 +6,7 @@ __pycache__/
 .coverage
 htmlcov/
 
-data/raw/
-data/processed/
-data/prepared/
-data/models/
-data/*.json
-data/*.csv
-
-v2*/
-v3*/
-v4*/
-v5*/
-v6*/
-v7*/
-
-batch*/
-batch_*/
-
+/data/
 
 reports/
 *.json
@@ -37,3 +21,10 @@ ENV/
 
 .huggingface/
 .cache/
+
+# Личные заметки и локальные служебные каталоги.
+/PROJECT_NOTES.md
+/inference_data/temp_text.txt
+/.agents/
+/.aws/
+/.codex/

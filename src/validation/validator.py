@@ -5,9 +5,13 @@
 import torch
 from pathlib import Path
 from typing import Dict, Any, List
-from transformers import AutoModelForTokenClassification
+from src.models.adapter import load_local_model, predict_token_labels, token_mask_from_samples
 
-from .metrics import compute_ner_metrics, extract_labels_from_tensors
+from src.device import resolve_device
+from src.data_preparation.bio_decoder import decode_bio
+
+from .metrics import compute_ner_metrics
+from .document_predictions import collect_document_predictions
 
 
 class NERValidator:
@@ -15,15 +19,17 @@ class NERValidator:
     Валидатор для NER модели.
     """
     
-    def __init__(self, model_path: Path, device: str = "cpu"):
-        self.model_path = Path(model_path)
-        self.device = device
+    def __init__(self, model_path: Path, device: str = "auto"):
+        self.model_path = Path(model_path).resolve()
+        if not self.model_path.is_dir():
+            raise ValueError(f"Локальная папка модели не найдена: {self.model_path}")
+        self.device = resolve_device(device)
         self.model = None
         self.id2label = None
         self._load_model()
     
     def _load_model(self):
-        self.model = AutoModelForTokenClassification.from_pretrained(self.model_path)
+        self.model = load_local_model(self.model_path)
         self.model.to(self.device)
         self.model.eval()
         
@@ -48,61 +54,53 @@ class NERValidator:
         Returns:
             Словарь с метриками
         """
-        import torch.nn.functional as F
         
-        all_true_labels = []
-        all_pred_labels = []
-        total_samples = 0
-        
-        target_length = 0
+        decoded_documents = []
+        # Схема модели фиксирована, а не выводится из встреченных предсказаний.
+        entity_types = None
         for batch_path in batch_paths:
             batch_data = prepared_storage.load_batch(batch_path)
-            tensors = batch_data['tensors']
-            current_length = tensors['input_ids'].shape[1]
-            if current_length > target_length:
-                target_length = current_length
-        
-        print(f"  Целевая длина для валидации: {target_length}")
-        
-        for batch_path in batch_paths:
-            batch_data = prepared_storage.load_batch(batch_path)
-            tensors = batch_data['tensors']
-            
-            input_ids = tensors['input_ids']
-            attention_mask = tensors['attention_mask']
-            labels = tensors['labels'].cpu().numpy()
-            
-            current_length = input_ids.shape[1]
-            if current_length < target_length:
-                pad_len = target_length - current_length
-                input_ids = F.pad(input_ids, (0, pad_len), value=0)
-                attention_mask = F.pad(attention_mask, (0, pad_len), value=0)
-            
-            input_ids = input_ids.to(self.device)
-            attention_mask = attention_mask.to(self.device)
-            
+            tensors, samples = batch_data['tensors'], batch_data.get('samples')
+            if samples is None or len(samples) != len(tensors['input_ids']):
+                raise ValueError('Нет samples.json для валидации: пересоздайте prepared-данные')
+            types = batch_data['dataset_info'].get('entity_types')
+            if types is None:
+                types = sorted({name[2:] for name in self.id2label.values() if name.startswith(('B-', 'I-'))})
+            if entity_types is None:
+                entity_types = list(types)
+            elif list(types) != entity_types:
+                raise ValueError('Батчи используют разные схемы типов')
+            for sample in samples:
+                if 'gold_entities' not in sample:
+                    raise ValueError('Нет исходного эталона gold_entities: пересоздайте prepared-данные')
             with torch.no_grad():
-                outputs = self.model(input_ids, attention_mask=attention_mask)
-                predictions = outputs.logits.cpu().numpy()
-            
-            true_labels, pred_labels = extract_labels_from_tensors(
-                predictions, labels, self.id2label, ignore_label
-            )
-            
-            all_true_labels.extend(true_labels)
-            all_pred_labels.extend(pred_labels)
-            total_samples += len(input_ids)
-        
-        print(f"Валидация завершена. Обработано {total_samples} образцов из {len(batch_paths)} батчей.")
-        
-        return compute_ner_metrics(all_true_labels, all_pred_labels)
+                predictions = predict_token_labels(self.model, tensors['input_ids'].to(self.device),
+                    tensors['attention_mask'].to(self.device),
+                    token_mask_from_samples(samples, tensors['input_ids'].shape[1], self.device)).cpu().numpy()
+            for row, sample in enumerate(samples):
+                offsets = sample['offset_mapping']
+                if len(offsets) > predictions.shape[1]:
+                    raise ValueError('Координаты длиннее предсказанной последовательности')
+                attention = tensors['attention_mask'][row, :len(offsets)]
+                predicted = [int(p) if int(mask) else ignore_label
+                    for p, mask in zip(predictions[row, :len(offsets)], attention)]
+                decoded_documents.append((sample, decode_bio(predicted, offsets, sample['text'],
+                        self.id2label, ignore_label=ignore_label)))
+        if not decoded_documents:
+            raise ValueError('Нет документов для оценки')
+        decoded_documents = collect_document_predictions(decoded_documents)
+        metrics = compute_ner_metrics(decoded_documents, entity_types)
+        metrics['entity_predictions'] = decoded_documents
+        print(f"Валидация: {len(decoded_documents)} документов; "
+              f"macro-F1={metrics['macro_f1']:.4f}; micro-F1={metrics['micro_f1']:.4f}")
+        return metrics
 
 
 def validate_model(
     model_path: Path,
     prepared_storage,
     batch_paths: List[Path],
-    device: str = "cpu"
+    device: str = "auto"
 ) -> Dict[str, Any]:
     """
     Функция валидации модели на нескольких батчах.

@@ -102,10 +102,13 @@ class NERVisualizer:
         return self._save_plot(fig, 'entity_distribution', save, open_result)
 
     def plot_metrics(self, metrics, title='Метрики модели', save=True, open_result=False):
-        names = ['Precision', 'Recall', 'F1']
-        values = [metrics.get(key, 0) * 100 for key in ['precision', 'recall', 'f1']]
+        keys = ['macro_f1', 'micro_f1', 'micro_precision', 'micro_recall']
+        if any(key not in metrics for key in keys):
+            raise ValueError('Нужны явные macro_f1/micro-метрики; старый f1 не переименовывается')
+        names = ['Macro-F1', 'Micro-F1', 'Micro-P', 'Micro-R']
+        values = [metrics[key] * 100 for key in keys]
         fig, ax = plt.subplots(figsize=(6, 4))
-        bars = ax.bar(names, values, color=['#4ECDC4', '#96CEB4', '#FF6B6B'],
+        bars = ax.bar(names, values, color=['#FF6B6B', '#4ECDC4', '#96CEB4', '#45B7D1'],
                       edgecolor='black')
         self._label_bars(ax, bars, percent=True)
         ax.set(ylim=(0, 105), ylabel='Проценты (%)', title=title)
@@ -131,18 +134,20 @@ class NERVisualizer:
     def plot_model_comparison(self, models_data, save=True, open_result=False):
         if not models_data:
             return None
+        if any('macro_f1' not in m or 'micro_f1' not in m for m in models_data):
+            raise ValueError('Сравнение требует macro_f1 и micro_f1 для каждой модели')
         fig, ax = plt.subplots(figsize=(max(8, len(models_data)), 6))
         positions = list(range(len(models_data)))
         for offset, key, label, color in [
-            (-0.25, 'precision', 'Precision', '#4ECDC4'),
-            (0, 'recall', 'Recall', '#96CEB4'), (0.25, 'f1', 'F1', '#FF6B6B'),
+            (-0.175, 'macro_f1', 'Macro-F1', '#FF6B6B'),
+            (0.175, 'micro_f1', 'Micro-F1', '#4ECDC4'),
         ]:
             bars = ax.bar([x + offset for x in positions],
-                          [m.get(key, 0) * 100 for m in models_data],
-                          width=0.25, label=label, color=color)
+                          [m[key] * 100 for m in models_data],
+                          width=0.35, label=label, color=color)
             self._label_bars(ax, bars, percent=True, rotation=90, fontsize=7)
         ax.set_xticks(positions)
-        ax.set_xticklabels([m.get('version', str(i + 1)) for i, m in enumerate(models_data)],
+        ax.set_xticklabels([m.get('display_name', m.get('version', str(i + 1))) for i, m in enumerate(models_data)],
                            rotation=45, ha='right', fontsize=9)
         ax.set(xlabel='Версия модели', ylabel='Значение (%)', ylim=(0, 105),
                title='Сравнение метрик моделей')

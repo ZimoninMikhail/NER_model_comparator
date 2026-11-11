@@ -21,7 +21,7 @@ class ProcessedDataStorage:
     
     def _get_timestamp(self) -> str:
         """Возвращает текущий timestamp в формате YYYYMMDD_HHMMSS_mmm."""
-        return datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]
+        return datetime.now().strftime("%Y%m%d_%H%M%S_%f")
     
     def save_batch(
         self,
@@ -47,37 +47,11 @@ class ProcessedDataStorage:
         batch_path = self.base_path / batch_name
         batch_path.mkdir(parents=True, exist_ok=True)
         
-        # Загружаем исходные метаданные из raw (если указан source_batch)
-        source_metadata = {}
-        source_batch_name = metadata.get("source_batch") if metadata else None
-        if source_batch_name:
-            source_metadata_path = self.base_path.parent / "raw" / source_batch_name / "metadata.json"
-            if source_metadata_path.exists():
-                with open(source_metadata_path, 'r', encoding='utf-8') as f:
-                    source_metadata = json.load(f)
-        
-        # Формируем метаданные согласно спецификации для processed
         full_metadata = {
-            # Ссылка на исходный батч
-            "source_batch": source_batch_name,
-            "source_stage": "raw",
-            
-            # Текущие метаданные
-            "batch_id": batch[0].get("batch_id", 0) if batch else 0,
-            "timestamp": timestamp,
-            "stage": "processed",
-            "num_documents": len(batch),
-            
-            # Статистика из raw
-            "total_entities_before": source_metadata.get("total_entities"),
-            
-            # Метаданные из переданных модулей (quality_checker, type_filter, quality_filter)
+            'source_stage': 'raw', 'batch_id': batch[0].get('batch_id', 0),
+            'timestamp': timestamp, 'stage': 'processed', 'num_documents': len(batch),
             **(metadata or {})
         }
-        
-        # Убираем source_batch из metadata, чтобы не дублировать
-        full_metadata.pop("source_batch", None)
-        
         # Добавляем статистику после фильтрации (если не передана)
         if "total_entities_after" not in full_metadata:
             total_entities = sum(doc.get("entities_count", 0) for doc in batch)

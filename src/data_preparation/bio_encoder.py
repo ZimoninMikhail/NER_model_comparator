@@ -1,150 +1,86 @@
-"""
-Модуль для генерации BIO-меток на основе токенов и сущностей.
-"""
-
-from typing import List, Dict, Any, Tuple
-
-
-def create_label_mapping(entity_types: List[str]) -> Tuple[Dict[str, int], Dict[int, str]]:
-    """
-    Создаёт маппинг BIO-меток → ID и обратно.
-    
-    Args:
-        entity_types: Список типов сущностей (COUNTRY, CITY, ...)
-        
-    Returns:
-        label2id: {метка: ID}
-        id2label: {ID: метка}
-    """
-    label2id = {'O': 0}
-    id2label = {0: 'O'}
-    
-    idx = 1
-    for entity_type in entity_types:
-        label2id[f'B-{entity_type}'] = idx
-        id2label[idx] = f'B-{entity_type}'
-        idx += 1
-        label2id[f'I-{entity_type}'] = idx
-        id2label[idx] = f'I-{entity_type}'
-        idx += 1
-    
-    return label2id, id2label
+"""Строгое преобразование плоской непрерывной разметки в BIO."""
+from copy import deepcopy
+from numbers import Integral
+from .bio_decoder import validate_offsets
 
 
-def generate_bio_labels(
-    offset_mapping: List[Tuple[int, int]],
-    entities: List[Dict[str, Any]],
-    label2id: Dict[str, int],
-    ignore_label: int = -100
-) -> List[int]:
-    """
-    Генерирует BIO-метки для токенов документа.
-    
-    Args:
-        offset_mapping: Список (start, end) для каждого токена
-        entities: Список сущностей (каждая с полем spans и type)
-        label2id: Маппинг метки → ID
-        ignore_label: ID для игнорируемых токенов ([CLS], [SEP], ...)
-        
-    Returns:
-        Список ID меток для каждого токена
-    """
-    num_tokens = len(offset_mapping)
-    labels = [ignore_label] * num_tokens
-    
-    for token_idx, (start, end) in enumerate(offset_mapping):
-        if start == 0 and end == 0:
-            continue
-        
-        best_label = 'O'
-        for entity in entities:
-            entity_type = entity.get('type')
-            
-            for span in entity.get('spans', []):
-                entity_start = span['start']
-                entity_end = span['end']
-                
-                if start >= entity_start and end <= entity_end:
-                    if start == entity_start:
-                        best_label = f'B-{entity_type}'
-                    else:
-                        best_label = f'I-{entity_type}'
-                    break
-            
-            if best_label != 'O':
-                break
-        
-        labels[token_idx] = label2id.get(best_label, ignore_label)
-    
+def create_label_mapping(entity_types):
+    if not entity_types or any(not isinstance(t, str) or not t for t in entity_types):
+        raise ValueError('Требуется непустой список типов')
+    if len(set(entity_types)) != len(entity_types):
+        raise ValueError('Типы не должны повторяться')
+    names = ['O'] + [prefix + kind for kind in entity_types for prefix in ('B-', 'I-')]
+    return {name: i for i, name in enumerate(names)}, dict(enumerate(names))
+
+
+def generate_bio_labels(offset_mapping, entities, label2id, ignore_label=-100):
+    offsets = validate_offsets(offset_mapping)
+    if 'O' not in label2id:
+        raise ValueError('В схеме отсутствует O')
+    labels = [ignore_label if span == (0, 0) else label2id['O'] for span in offsets]
+    ordered = []
+    for entity in entities:
+        kind = entity.get('type')
+        if f'B-{kind}' not in label2id or f'I-{kind}' not in label2id:
+            raise ValueError(f'Тип отсутствует в BIO-схеме: {kind}')
+        spans = entity.get('spans', [])
+        if len(spans) != 1:
+            raise ValueError('BIO-кодировщик принимает только одну непрерывную область сущности')
+        start, end = spans[0].get('start'), spans[0].get('end')
+        if any(not isinstance(v, Integral) or isinstance(v, bool) for v in (start, end)) or not 0 <= start < end:
+            raise ValueError('Некорректные границы сущности')
+        ordered.append((int(start), int(end), kind))
+    ordered.sort()
+    if any(a[1] > b[0] for a, b in zip(ordered, ordered[1:])):
+        raise ValueError('Обнаружены пересекающиеся сущности: сначала выполните flattening')
+    for start, end, kind in ordered:
+        indexes = [i for i, (a, b) in enumerate(offsets) if (a, b) != (0, 0) and a < end and start < b]
+        if not indexes or offsets[indexes[0]][0] != start or offsets[indexes[-1]][1] != end:
+            raise ValueError(f'Границы сущности {kind} [{start}, {end}) не совпадают с токенами')
+        if any(not start <= offsets[i][0] < offsets[i][1] <= end for i in indexes):
+            raise ValueError('Токен пересекает границу сущности')
+        if indexes != list(range(indexes[0], indexes[-1] + 1)):
+            raise ValueError('Сущность пересекает служебный токен')
+        for position, index in enumerate(indexes):
+            labels[index] = label2id[('B-' if position == 0 else 'I-') + kind]
     return labels
 
 
-def encode_document(
-    doc: Dict[str, Any],
-    tokenizer,
-    label2id: Dict[str, int],
-    max_length: int = 512
-) -> Dict[str, Any]:
-    """
-    Преобразует один документ в BIO-формат.
-    
-    Args:
-        doc: Документ с полями text, parsed_entities
-        tokenizer: Токенизатор BERT
-        label2id: Маппинг меток
-        max_length: Максимальная длина
-        
-    Returns:
-        Словарь с input_ids, attention_mask, labels
-    """
+def encode_document_chunks(doc, tokenizer, label2id, max_length=512):
+    """Один или несколько образцов с эталоном полного исходного документа."""
+    import json
+    from .document_chunker import chunk_document, CHUNKING_VERSION
     text = doc.get('text', '')
     entities = doc.get('parsed_entities', [])
-    
-    encoding = tokenizer(
-        text,
-        max_length=max_length,
-        truncation=True,
-        padding=False,
-        return_offsets_mapping=True,
-        return_tensors=None
-    )
-    
-    labels = generate_bio_labels(
-        encoding['offset_mapping'],
-        entities,
-        label2id
-    )
-    
-    return {
-        'doc_id': doc.get('doc_id'),
-        'input_ids': encoding['input_ids'],
-        'attention_mask': encoding['attention_mask'],
-        'labels': labels
-    }
+    try:
+        chunks = chunk_document(text, tokenizer, max_length, entities)
+    except ValueError as exc:
+        raise ValueError(f'Документ {doc.get("doc_id")}: {exc}') from exc
+    # Проверяем всю схему и пересечения, не токенизируя документ повторно.
+    offsets = [span for chunk in chunks for span in chunk['offset_mapping'] if span != (0, 0)]
+    generate_bio_labels(offsets, entities, label2id)
+    result = []
+    for index, chunk in enumerate(chunks):
+        gold = [entity for entity in entities
+                if chunk['chunk_start'] <= entity['spans'][0]['start']
+                and entity['spans'][0]['end'] <= chunk['chunk_end']]
+        result.append({**chunk, 'doc_id': doc.get('doc_id'), 'text': text,
+            'split': doc.get('split'),
+            'sample_id': json.dumps([doc.get('doc_id'), index], ensure_ascii=False),
+            'chunk_index': index, 'chunk_count': len(chunks), 'chunking_version': CHUNKING_VERSION,
+            'document_gold_entities': deepcopy(entities), 'gold_entities': deepcopy(gold),
+            'labels': generate_bio_labels(chunk['offset_mapping'], gold, label2id)})
+    return result
 
 
-def encode_batch(
-    batch: List[Dict[str, Any]],
-    tokenizer,
-    label2id: Dict[str, int],
-    max_length: int = 512
-) -> List[Dict[str, Any]]:
-    """
-    Преобразует батч документов в BIO-формат.
-    
-    Args:
-        batch: Список документов с полями text, parsed_entities
-        tokenizer: Токенизатор BERT
-        label2id: Маппинг меток
-        max_length: Максимальная длина
-        
-    Returns:
-        Список документов с полями input_ids, attention_mask, labels
-    """
-    encoded_batch = []
-    
-    for doc in batch:
-        encoded = encode_document(doc, tokenizer, label2id, max_length)
-        encoded_batch.append(encoded)
-    
-    return encoded_batch
+def encode_document(doc, tokenizer, label2id, max_length=512):
+    """API одного образца. Для длинных документов используйте encode_document_chunks."""
+    chunks = encode_document_chunks(doc, tokenizer, label2id, max_length)
+    if len(chunks) != 1:
+        raise ValueError('Документ длиннее одного фрагмента; используйте encode_document_chunks')
+    return chunks[0]
+
+
+def encode_batch(batch, tokenizer, label2id, max_length=512):
+    return [chunk for doc in batch
+            for chunk in encode_document_chunks(doc, tokenizer, label2id, max_length)]

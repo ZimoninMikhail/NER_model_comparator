@@ -2,55 +2,38 @@
 Точка входа в MLOps пайплайн.
 
 Поддерживаемые режимы:
-    - update: Полный цикл обработки данных и дообучение модели
+    - type-statistics: Сохранение приоритета типов по train
+    - prepare: Подготовка версии общих данных
+    - train: Обучение на выбранной версии данных
+    - update: Полный цикл подготовки и обучения
     - inference: Применение модели к новым данным
     - summary: Генерация отчёта о работе системы
     - benchmark: Измерение характеристик производительности
+    - evaluate: Оценка сохранённых моделей на выбранном dev/test
 """
 
 import argparse
 import sys
 import json
-import os
 from pathlib import Path
 from datetime import datetime
+from uuid import uuid4
+from src.config import load_config, validate_config
 
 import numpy as np
 import torch
 
 sys.path.insert(0, str(Path(__file__).parent))
 
-from src.data_collection.loader import StreamingDataLoader
 from src.data_collection.storage import RawDataStorage
-from src.data_collection.metadata_calculator import calculate_batch_metadata
-
-from src.data_analysis.parser import parse_batch_entities
-from src.data_analysis.type_filter import filter_batch_geo, get_filter_statistics
-from src.data_analysis.quality_checker import check_document_quality, calculate_batch_quality
-from src.data_analysis.quality_filter import filter_batch_by_quality, get_quality_filter_statistics
 from src.data_analysis.processed_data_storage import ProcessedDataStorage
-
-from src.data_preparation.tokenizer_setup import load_tokenizer
-from src.data_preparation.bio_encoder import create_label_mapping, encode_batch
 from src.data_preparation.prepared_data_storage import PreparedDataStorage
-
-from src.training.trainer import train_from_batches
 from src.validation.model_registry import ModelRegistry
-from src.validation.validator import validate_model
 
 from src.inference import InferencePipeline
 
 
-GEO_TYPES = ["COUNTRY", "CITY", "LOCATION", "STATE_OR_PROV", "DISTRICT"]
-MAX_LENGTH = 512
-MODEL_NAME = "DeepPavlov/rubert-base-cased"
-MIN_CONSISTENCY = 0.95
-MIN_ENTITIES = 1
 
-#params
-NUM_EPOCHS = 3
-BATCH_SIZE = 2
-TRAIN_SPLIT = 0.8
 
 def _make_serializable(obj):
     if isinstance(obj, np.integer):
@@ -68,248 +51,96 @@ def _make_serializable(obj):
     return obj
 
 
-def _save_validation_report(metrics: dict, version: str):
-    """Сохраняет отчёт о валидации в reports/validation/"""
-    report_dir = Path("reports/validation")
-    report_dir.mkdir(parents=True, exist_ok=True)
-    
-    report_path = report_dir / f"val_{version}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
-    with open(report_path, 'w', encoding='utf-8') as f:
-        json.dump(_make_serializable(metrics), f, indent=2, ensure_ascii=False)
-    
-    print(f"   Отчёт валидации сохранён: {report_path}")
-    return str(report_path)
+def _config(config=None):
+    return validate_config(config) if config is not None else load_config()
 
 
-def _save_training_history(history: dict, version: str):
-    """Сохраняет историю обучения"""
-    report_dir = Path("reports/training")
-    report_dir.mkdir(parents=True, exist_ok=True)
-    
-    report_path = report_dir / f"train_history_{version}.json"
-    with open(report_path, 'w', encoding='utf-8') as f:
-        json.dump(_make_serializable(history), f, indent=2, ensure_ascii=False)
-    
-    print(f"   История обучения сохранена: {report_path}")
-    return str(report_path)
+def _report_path(config, category, prefix, suffix='json'):
+    folder = Path(config['paths']['reports']) / category
+    folder.mkdir(parents=True, exist_ok=True)
+    return folder / f"{prefix}_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}_{uuid4().hex[:8]}.{suffix}"
 
-def run_update(plot_loss: bool = False, plot_metrics: bool = False, 
-               plot_entities: bool = False, open_result: bool = False):
-    print("\n" + "="*60)
-    print("ЗАПУСК UPDATE ПАЙПЛАЙНА")
-    print("="*60)
-    
-    raw_storage = RawDataStorage("data/raw")
-    processed_storage = ProcessedDataStorage("data/processed")
-    prepared_storage = PreparedDataStorage("data/prepared")
-    
-    raw_storage.clear()
-    processed_storage.clear()
-    prepared_storage.clear()
-    
-    print("\n1. Загрузка данных...")
-    loader = StreamingDataLoader(batch_size=32, shuffle=True)
-    loader.load_train()
-    print(f"   Всего документов: {len(loader)}")
-    
-    all_entities_for_plot = []
-    
-    for batch_num, batch in enumerate(loader):
-        print(f"\n2. Обработка батча {batch_num + 1}...")
-        
-        raw_metadata = calculate_batch_metadata(batch)
-        raw_path = raw_storage.save_batch(batch, raw_metadata)
-        
-        parsed_batch = parse_batch_entities(batch)
-        geo_batch = filter_batch_geo(parsed_batch, remove_empty_docs=True)
-        geo_stats = get_filter_statistics(geo_batch)
-        
-        for doc in geo_batch:
-            for ent in doc.get('parsed_entities', []):
-                all_entities_for_plot.append({'type': ent.get('type')})
-        
-        quality_batch = [check_document_quality(doc) for doc in geo_batch]
-        quality_metrics = calculate_batch_quality(quality_batch)
-        
-        final_batch = filter_batch_by_quality(
-            quality_batch,
-            min_consistency=MIN_CONSISTENCY,
-            min_entities=MIN_ENTITIES
-        )
-        quality_filter_stats = get_quality_filter_statistics(final_batch)
-        
-        processed_metadata = {
-            "source_batch": raw_path.name,
-            **geo_stats,
-            **quality_metrics,
-            **quality_filter_stats
-        }
-        processed_storage.save_batch(final_batch, processed_metadata)
-        
-        if final_batch:
-            tokenizer = load_tokenizer(MODEL_NAME, MAX_LENGTH)
-            label2id, id2label = create_label_mapping(GEO_TYPES)
-            encoded_batch = encode_batch(final_batch, tokenizer, label2id, MAX_LENGTH)
-            
-            dataset_info = {
-                'label2id': label2id,
-                'id2label': id2label,
-                'num_labels': len(label2id),
-                'entity_types': GEO_TYPES,
-                'tokenizer_name': MODEL_NAME,
-                'max_length': MAX_LENGTH
-            }
-            
-            prepared_metadata = {
-                "source_batch": raw_path.name,
-                "batch_id": final_batch[0].get('batch_id', 0),
-                "num_samples": len(encoded_batch)
-            }
-            prepared_storage.save_batch(encoded_batch, prepared_metadata, dataset_info)
-    
-    print("\n3. Разделение на train/val...")
-    
-    all_batch_paths = prepared_storage.list_batches()
-    print(f"   Найдено prepared батчей: {len(all_batch_paths)}")
-    
-    if not all_batch_paths:
-        print("Ошибка: нет подготовленных данных для обучения")
-        return False
 
-    split_idx = int(len(all_batch_paths) * TRAIN_SPLIT)
-    train_paths = all_batch_paths[:split_idx]
-    val_paths = all_batch_paths[split_idx:]
-    
-    print(f"   Train батчей: {len(train_paths)}")
-    print(f"   Val батчей: {len(val_paths)}")
-    
-    print("\n4. Обучение модели...")
-    print(f"   Эпохи: {NUM_EPOCHS}")
-    print(f"   Batch size: {BATCH_SIZE}")
-    
-    model_path, version, loss_history = train_from_batches(
-        prepared_storage=prepared_storage,
-        batch_paths=train_paths,
-        model_name=MODEL_NAME,
-        models_dir="./data/models",
-        num_epochs=NUM_EPOCHS,
-        batch_size=BATCH_SIZE
-    )
-    
-    registry = ModelRegistry()
-    registry.register_model(
-        model_path=model_path,
-        metrics=None,
-        metadata={
-            'status': 'trained',
-            'train_batches': len(train_paths),
-            'val_batches': len(val_paths),
-            'num_epochs': NUM_EPOCHS,
-            'batch_size': BATCH_SIZE
-        }
-    )
-    
-    print("\n5. Валидация модели...")
-    
-    metrics = validate_model(
-        model_path=Path(model_path),
-        prepared_storage=prepared_storage,
-        batch_paths=val_paths,
-        device="cpu"
-    )
-    
-    registry.update_metrics(version, metrics)
-    
-    _save_validation_report(metrics, version)
-    
-    first_batch_data = prepared_storage.load_batch(all_batch_paths[0])
-    dataset_info = first_batch_data['dataset_info']
-    
-    training_history = {
-        'version': version,
-        'num_epochs': NUM_EPOCHS,
-        'batch_size': BATCH_SIZE,
-        'train_batches': len(train_paths),
-        'val_batches': len(val_paths),
-        'metrics': metrics,
-        'dataset_info': {
-            'num_labels': dataset_info.get('num_labels'),
-            'entity_types': dataset_info.get('entity_types'),
-            'max_length': dataset_info.get('max_length')
-        },
-        'timestamp': datetime.now().isoformat()
-    }
-    _save_training_history(training_history, version)
-    
+def _read_texts(file_path):
+    path = Path(file_path).expanduser()
+    if not path.is_file():
+        raise ValueError(f'Входной файл не найден: {path}')
+    texts = [line for line in path.read_text(encoding='utf-8').splitlines() if line.strip()]
+    if not texts:
+        raise ValueError(f'Входной файл пуст: {path}')
+    return texts
+
+
+def run_prepare(config=None):
+    """Подготовить общую версию документов без обучения и токенизации."""
+    from src.config import load_config
+    from src.pipeline import prepare_data
+    return prepare_data(config if config is not None else load_config())
+
+
+def run_train(dataset_version, config=None, plot_loss=False, plot_metrics=False,
+              plot_entities=False, open_result=False):
+    from src.config import load_config
+    from src.pipeline import train, load_dataset_version
     from src.visualization.visualizer import NERVisualizer
-    visualizer = NERVisualizer()
+    config = _config(config)
+    report = train(config, dataset_version)
     components = []
-    
-    if plot_entities and all_entities_for_plot:
-        path = visualizer.plot_entity_distribution(
-            all_entities_for_plot,
-            title="Распределение сущностей в обучающих данных",
-            save=True,
-            open_result=False
-        )
-        if path:
-            components.append({
-                'type': 'plot',
-                'path': path,
-                'title': 'Распределение сущностей по типам',
-                'description': f'Всего сущностей: {len(all_entities_for_plot)}'
-            })
-    
-    if plot_metrics and metrics:
-        path = visualizer.plot_metrics(
-            metrics,
-            title="Метрики модели на валидации",
-            save=True,
-            open_result=False
-        )
-        if path:
-            components.append({
-                'type': 'plot',
-                'path': path,
-                'title': 'Метрики качества модели',
-                'description': f'F1: {metrics.get("f1", 0):.3f}'
-            })
-    
-    if plot_loss and loss_history:
-        losses = [item['loss'] for item in loss_history]
-        steps = [item['step'] for item in loss_history]
-        path = visualizer.plot_loss_curve(
-            losses,
-            steps=steps,
-            title="Кривая обучения",
-            save=True,
-            open_result=False
-        )
-        if path:
-            components.append({
-                'type': 'plot',
-                'path': path,
-                'title': 'Кривая обучения',
-                'description': f'Финальный loss: {losses[-1]:.4f}'
-            })
-    
-    if open_result and components:
-        visualizer.create_dashboard(components, open_result=True)
-    
-    print(f"\n" + "="*60)
-    print("ОБУЧЕНИЕ ЗАВЕРШЕНО")
-    print("="*60)
-    print(f"   Версия модели: {version}")
-    print(f"   Train батчей: {len(train_paths)}")
-    print(f"   Val батчей: {len(val_paths)}")
-    print(f"   F1: {metrics.get('f1', 0):.4f}")
-    print(f"   Precision: {metrics.get('precision', 0):.4f}")
-    print(f"   Recall: {metrics.get('recall', 0):.4f}")
-    print("="*60)
-    
-    return True
+    if any((plot_loss, plot_metrics, plot_entities)):
+        visualizer = NERVisualizer(config['paths']['visualization'])
+        if plot_loss and report['loss_history']:
+            history = report['loss_history']
+            path = visualizer.plot_loss_curve([x['loss'] for x in history],
+                                             [x['step'] for x in history])
+            components.append({'type': 'plot', 'path': path, 'title': 'Кривая обучения'})
+        if plot_metrics:
+            path = visualizer.plot_metrics(report['metrics'])
+            components.append({'type': 'plot', 'path': path, 'title': 'Метрики на dev'})
+        if plot_entities:
+            root, manifest = load_dataset_version(config, dataset_version)
+            counts = {}
+            for name in manifest['splits']['train']:
+                for doc_path in (root / 'train' / name).glob('doc_*.json'):
+                    doc = json.loads(doc_path.read_text(encoding='utf-8'))
+                    for entity in doc.get('parsed_entities', []):
+                        kind = entity['type']
+                        counts[kind] = counts.get(kind, 0) + 1
+            if counts:
+                path = visualizer.plot_entity_distribution(counts)
+                components.append({'type': 'plot', 'path': path, 'title': 'Сущности train'})
+        if open_result and components:
+            visualizer.create_dashboard(components, open_result=True)
+    print(f"Обучение завершено: {report['version']}; данные: {dataset_version}")
+    return report
 
-def run_inference(file_path: str, highlight: bool = False, plots: bool = False, open_result: bool = False):
+
+def run_update(plot_loss=False, plot_metrics=False, plot_entities=False,
+               open_result=False, config=None):
+    """Полный цикл: подготовить версию и обучить на ней модель."""
+    from src.config import load_config
+    config = _config(config)
+    if config['model']['architecture'] == 'gliner':
+        raise ValueError('GLiNER используется без дообучения; режим update недоступен')
+    dataset_version = run_prepare(config)
+    return run_train(dataset_version, config=config, plot_loss=plot_loss,
+                     plot_metrics=plot_metrics, plot_entities=plot_entities,
+                     open_result=open_result)
+
+
+def _create_inference_pipeline(config=None, model_version=None):
+    from src.config import load_config, validate_config
+    config = validate_config(config) if config is not None else load_config()
+    if config['model']['architecture'] == 'gliner':
+        return InferencePipeline(device=config['device'], architecture='gliner',
+            gliner_model_path=config['model']['name'], model_version=model_version,
+            type_mapping=config['model']['type_mapping'], threshold=config['model']['threshold'],
+            max_length=config['data']['max_seq_length'])
+    return InferencePipeline(device=config['device'],
+        models_dir=config['paths']['models'], max_length=config['data']['max_seq_length'],
+        model_version=model_version)
+
+
+def run_inference(file_path=None, highlight: bool = False, plots: bool = False, open_result: bool = False, config=None, text=None, model_version=None):
     """
     Применение модели к данным из файла.
     
@@ -323,24 +154,21 @@ def run_inference(file_path: str, highlight: bool = False, plots: bool = False, 
     print("ЗАПУСК INFERENCE")
     print("="*60)
     
-    file_path = Path(file_path)
-    if not file_path.exists():
-        print(f"Ошибка: файл {file_path} не найден")
-        return None
-    
-    with open(file_path, 'r', encoding='utf-8') as f:
-        texts = [line.strip() for line in f if line.strip()]
-    
+    config = _config(config)
+    if (file_path is None) == (text is None):
+        raise ValueError('Для inference укажите ровно один источник: файл или текст')
+    if text is not None:
+        if not text.strip():
+            raise ValueError('Текст для inference пуст')
+        texts = [text]
+    else:
+        texts = _read_texts(file_path)
+
     print(f"Загружено текстов: {len(texts)}")
     
-    pipeline = InferencePipeline(
-        model_version=None,
-        tokenizer_name=MODEL_NAME,
-        device="cpu",
-        max_length=MAX_LENGTH
-    )
+    pipeline = _create_inference_pipeline(config, model_version=model_version)
     from src.visualization.visualizer import NERVisualizer
-    visualizer = NERVisualizer()
+    visualizer = NERVisualizer(config['paths']['visualization'])
     
     results = []
     all_entities = []
@@ -358,7 +186,7 @@ def run_inference(file_path: str, highlight: bool = False, plots: bool = False, 
         
         if highlight and not open_result:
             colored_text = visualizer.highlight_entities_terminal(text, entities)
-            print(f"\n{i+1}. {colored_text[:100]}...")
+            print(f"\n{i+1}. {colored_text}")
         elif not open_result:
             print(f"\n{i+1}. {text[:100]}...")
             if entities:
@@ -367,9 +195,9 @@ def run_inference(file_path: str, highlight: bool = False, plots: bool = False, 
             else:
                 print("     Сущности не найдены")
     
-    predictions_dir = Path("data/predictions")
+    predictions_dir = Path(config['paths']['predictions'])
     predictions_dir.mkdir(parents=True, exist_ok=True)
-    output_path = predictions_dir / f"predictions_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+    output_path = predictions_dir / f"predictions_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}_{uuid4().hex[:8]}.json"
     
     with open(output_path, 'w', encoding='utf-8') as f:
         results_serializable = _make_serializable(results)
@@ -409,21 +237,35 @@ def run_inference(file_path: str, highlight: bool = False, plots: bool = False, 
     
     return str(output_path)
 
-def run_summary(plots: bool = False, compare: bool = False, open_result: bool = False):
+def run_evaluate(dataset_version, split, config=None, plot_metrics=False, open_result=False, model_version=None):
+    from src.validation.evaluator import evaluate_model
+    report = evaluate_model(_config(config), dataset_version, split, model_version=model_version)
+    label = {"bert":"BERT", "bilstm_crf":"BiLSTM-CRF", "gliner":"GLiNER"}[report["architecture"]]
+    if plot_metrics:
+        from src.visualization.visualizer import NERVisualizer
+        visualizer = NERVisualizer(report['config']['paths']['visualization'])
+        path = visualizer.plot_metrics(report['metrics'], title=f"{label}: {split}")
+        if open_result:
+            visualizer.create_dashboard([{'type':'plot','path':path,'title':f'{label}: {split}'}], open_result=True)
+    return report
+
+
+def run_summary(plots: bool = False, compare: bool = False, open_result: bool = False, plot_metrics: bool = False, config=None):
     print("\n" + "="*60)
     print("ГЕНЕРАЦИЯ ОТЧЁТА")
     print("="*60)
     
+    config = _config(config)
     report = {
         'timestamp': datetime.now().isoformat(),
         'stages': {}
     }
     
-    raw_storage = RawDataStorage("data/raw")
-    raw_batches = raw_storage.list_batches()
+    raw_storage = RawDataStorage(config['paths']['raw'])
+    raw_batches = sorted(p.parent for p in raw_storage.base_path.rglob("metadata.json"))
     report['stages']['raw'] = {
         'num_batches': len(raw_batches),
-        'batches': [b.name for b in raw_batches]
+        'batches': [str(b.relative_to(raw_storage.base_path)) for b in raw_batches]
     }
     if raw_batches:
         latest_raw = raw_storage.get_metadata(raw_batches[-1])
@@ -433,11 +275,11 @@ def run_summary(plots: bool = False, compare: bool = False, open_result: bool = 
             'entity_types': list(latest_raw.get('entity_type_distribution', {}).keys())[:10]
         }
     
-    processed_storage = ProcessedDataStorage("data/processed")
-    processed_batches = processed_storage.list_batches()
+    processed_storage = ProcessedDataStorage(config['paths']['processed'])
+    processed_batches = sorted(p.parent for p in processed_storage.base_path.rglob("metadata.json"))
     report['stages']['processed'] = {
         'num_batches': len(processed_batches),
-        'batches': [b.name for b in processed_batches]
+        'batches': [str(b.relative_to(processed_storage.base_path)) for b in processed_batches]
     }
     if processed_batches:
         latest_processed = processed_storage.get_metadata(processed_batches[-1])
@@ -447,20 +289,20 @@ def run_summary(plots: bool = False, compare: bool = False, open_result: bool = 
             'docs_removed': latest_processed.get('docs_removed')
         }
     
-    prepared_storage = PreparedDataStorage("data/prepared")
-    prepared_batches = prepared_storage.list_batches()
+    prepared_storage = PreparedDataStorage(config['paths']['prepared'])
+    prepared_batches = sorted(p.parent for p in prepared_storage.base_path.rglob("metadata.json"))
     report['stages']['prepared'] = {
         'num_batches': len(prepared_batches),
-        'batches': [b.name for b in prepared_batches]
+        'batches': [str(b.relative_to(prepared_storage.base_path)) for b in prepared_batches]
     }
     if prepared_batches:
-        latest_prepared = prepared_storage.load_batch(prepared_batches[-1])
+        latest_prepared = {'metadata': json.loads((prepared_batches[-1] / 'metadata.json').read_text(encoding='utf-8'))}
         report['stages']['prepared']['latest_stats'] = {
             'num_samples': latest_prepared['metadata'].get('num_samples'),
             'max_length': latest_prepared['metadata'].get('max_length')
         }
     
-    registry = ModelRegistry()
+    registry = ModelRegistry(config['paths']['models'])
     latest_model = registry.get_latest()
     all_versions = registry.list_versions()
     
@@ -473,9 +315,13 @@ def run_summary(plots: bool = False, compare: bool = False, open_result: bool = 
     else:
         report['models'] = {'status': 'no_models_trained'}
     
-    report_dir = Path("reports/summary")
-    report_dir.mkdir(parents=True, exist_ok=True)
-    report_path = report_dir / f"summary_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+    from src.validation.evaluation_reports import load_evaluation_reports, comparison_groups
+    evaluations = load_evaluation_reports(config['paths']['reports'])
+    report['evaluations'] = [{key:item[key] for key in (
+        'evaluation_id','architecture','dataset_version','split','fine_tuning',
+        'timestamp','metrics','report_path')} for item in evaluations]
+
+    report_path = _report_path(config, 'summary', 'summary')
     
     with open(report_path, 'w', encoding='utf-8') as f:
         json.dump(report, f, indent=2, ensure_ascii=False)
@@ -490,49 +336,48 @@ def run_summary(plots: bool = False, compare: bool = False, open_result: bool = 
         print(f"   Последняя модель: {report['models']['latest_version']}")
         metrics = report['models']['latest_metrics']
         if metrics:
-            print(f"     F1: {metrics.get('f1', 'N/A')}")
-            print(f"     Precision: {metrics.get('precision', 'N/A')}")
-            print(f"     Recall: {metrics.get('recall', 'N/A')}")
-    
+            print(f"     Macro-F1: {metrics.get('macro_f1', 'нет в старом отчёте')}")
+            print(f"     Micro-F1: {metrics.get('micro_f1', 'нет в старом отчёте')}")
+            print(f"     Micro-P/R: {metrics.get('micro_precision', 'N/A')} / {metrics.get('micro_recall', 'N/A')}")
+
+    if evaluations:
+        latest_evaluation = evaluations[-1]
+        print(f"   {latest_evaluation['architecture']} ({latest_evaluation['split']}): "
+              f"macro-F1={latest_evaluation['metrics']['macro_f1']:.4f}")
+
     print(f"\nОтчёт сохранён в: {report_path}")
     
     from src.visualization.visualizer import NERVisualizer
-    visualizer = NERVisualizer()
+    visualizer = NERVisualizer(config['paths']['visualization'])
     components = []
     
-    if compare and all_versions:
-        models_data = []
-        for version in all_versions:
-            model_info = registry.get_version(version)
-            if model_info:
-                metrics = model_info.get('metrics', {})
-                if metrics:
-                    models_data.append({
-                        'version': version,
-                        'f1': metrics.get('f1', 0),
-                        'precision': metrics.get('precision', 0),
-                        'recall': metrics.get('recall', 0),
-                        'timestamp': model_info.get('timestamp', '')
-                    })
-        
-        if models_data:
-            models_data.sort(key=lambda x: x.get('timestamp', ''))
-            path = visualizer.plot_model_comparison(
-                models_data,
-                save=True,
-                open_result=False
-            )
+    if plot_metrics and latest_model:
+        latest_metrics = latest_model.get('metrics', {})
+        if 'macro_f1' in latest_metrics:
+            path = visualizer.plot_metrics(latest_metrics)
+            components.append({'type': 'plot', 'path': path, 'title': 'Macro- и micro-метрики'})
+        else:
+            print('[INFO] Старый отчёт без macro_f1: график метрик пропущен')
+
+    if plot_metrics and evaluations:
+        item = evaluations[-1]
+        path = visualizer.plot_metrics(item['metrics'], title=f"{item['architecture']}: {item['split']}")
+        components.append({'type':'plot','path':path,'title':f"{item['architecture']}: {item['split']}"})
+
+    if compare:
+        entries = [registry.get_version(version) for version in all_versions]
+        groups = comparison_groups([entry for entry in entries if entry], evaluations)
+        for group in groups:
+            path = visualizer.plot_model_comparison(group['models'],save=True,open_result=False)
             if path:
-                components.append({
-                    'type': 'plot',
-                    'path': path,
-                    'title': 'Сравнение версий моделей',
-                    'description': f'Всего моделей: {len(models_data)}'
-                })
-    
+                title = f"Сравнение: {group['dataset_version'] or 'неизвестная версия'}, {group['split']}"
+                print(title)
+                components.append({'type':'plot','path':path,'title':title,
+                    'description':f"Результатов: {len(group['models'])}; одинаковые версия, split и схема типов"})
+
     if plots:
         all_entities = []
-        for batch_dir in processed_storage.list_batches():
+        for batch_dir in processed_batches:
             metadata = processed_storage.get_metadata(batch_dir)
             dist = metadata.get('entity_type_distribution', {})
             for ent_type, count in dist.items():
@@ -561,200 +406,117 @@ def run_summary(plots: bool = False, compare: bool = False, open_result: bool = 
     
     return str(report_path)
 
-def run_benchmark(file_path=None, plots=False, open_result=False):
-    import time
-    import psutil
-    import tracemalloc
-    
-    print("\n" + "="*60)
-    print("БЕНЧМАРКИНГ СИСТЕМЫ")
-    print("="*60)
-    
-    if file_path and Path(file_path).exists():
-        with open(file_path, 'r', encoding='utf-8') as f:
-            texts = [line.strip() for line in f if line.strip()]
-        print(f"[INFO] Загружено {len(texts)} текстов из {file_path}")
-    else:
-        default_texts = [
-            "Москва является столицей России.",
-            "Президент России Владимир Путин посетил Санкт-Петербург.",
-            "Компания Яндекс находится в Москве на улице Льва Толстого.",
-            "Озеро Байкал находится в Сибири, недалеко от Иркутска.",
-            "Париж - столица Франции, известная Эйфелевой башней.",
-            "Берлин расположен на реке Шпрее.",
-            "Лондон - столица Великобритании.",
-            "Токио находится в Японии."
-        ]
-        texts = default_texts
-        print(f"[INFO] Используются тестовые тексты по умолчанию ({len(texts)} шт.)")
-    
-    print("\n[INFO] Инициализация пайплайна инференса...")
-    pipeline = InferencePipeline(
-        model_version=None,
-        tokenizer_name=MODEL_NAME,
-        device="cpu",
-        max_length=MAX_LENGTH
-    )
-    
-    print("\n[INFO] Выполнение бенчмаркинга инференса...")
-    times = []
-    memory_samples = []
-    results = []
-    
-    for i, text in enumerate(texts):
-        tracemalloc.start()
-        mem_before = tracemalloc.get_traced_memory()[1]
-        
-        start = time.time()
-        entities = pipeline.predict(text)
-        elapsed = time.time() - start
-        
-        mem_after = tracemalloc.get_traced_memory()[1]
-        tracemalloc.stop()
-        
-        times.append(elapsed)
-        memory_samples.append(mem_after - mem_before)
-        results.append({'text': text, 'entities': entities, 'time_sec': elapsed})
-        
-        print(f"  Текст {i+1}: {elapsed:.4f} сек, память: {(mem_after - mem_before) / 1024:.2f} KB")
-    
-    avg_time = sum(times) / len(times)
-    avg_memory = sum(memory_samples) / len(memory_samples) / 1024
-    total_memory = psutil.Process().memory_info().rss / 1024 / 1024
-    
-    benchmark_results = {
-        "timestamp": datetime.now().isoformat(),
-        "model_name": MODEL_NAME,
-        "num_texts": len(texts),
-        "inference": {
-            "avg_time_sec": avg_time,
-            "avg_time_ms": avg_time * 1000,
-            "min_time_sec": min(times),
-            "max_time_sec": max(times),
-            "std_time_sec": float(np.std(times)) if len(times) > 1 else 0,
-            "times_per_text": times
-        },
-        "memory": {
-            "avg_inference_memory_kb": avg_memory,
-            "total_process_memory_mb": total_memory
-        },
-        "throughput": len(texts) / sum(times),
-        "predictions": [
-            {"text": t[:100], "num_entities": len(e)} 
-            for t, e in zip(texts, [r['entities'] for r in results])
-        ]
-    }
-    
-    os.makedirs("reports/monitoring", exist_ok=True)
-    report_path = f"reports/monitoring/benchmark_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
-    with open(report_path, 'w', encoding='utf-8') as f:
-        json.dump(_make_serializable(benchmark_results), f, indent=2, ensure_ascii=False)
-    
-    print("\n" + "="*60)
-    print("РЕЗУЛЬТАТЫ БЕНЧМАРКИНГА")
-    print("="*60)
-    print(f"  Модель: {MODEL_NAME}")
-    print(f"  Количество текстов: {len(texts)}")
-    print(f"  Среднее время инференса: {avg_time*1000:.2f} мс")
-    print(f"  Мин. время инференса: {min(times)*1000:.2f} мс")
-    print(f"  Макс. время инференса: {max(times)*1000:.2f} мс")
-    print(f"  Пропускная способность: {benchmark_results['throughput']:.2f} текстов/сек")
-    print(f"  Средняя память на инференс: {avg_memory:.2f} KB")
-    print(f"  Память процесса (RSS): {total_memory:.1f} MB")
-    print(f"\n[INFO] Отчёт сохранён: {report_path}")
-    
-    # Визуализация
+def run_benchmark(file_path=None, plots=False, open_result=False, config=None, warmup=None, repeats=None, model_version=None):
+    from src.benchmark import measure_inference
+    config = _config(config)
+    if warmup is not None:
+        config['benchmark']['warmup_runs'] = warmup
+    if repeats is not None:
+        config['benchmark']['repeats'] = repeats
+    config = validate_config(config)
+    texts = _read_texts(file_path) if file_path is not None else [
+        'Москва является столицей России.', 'Париж — столица Франции.',
+        'Озеро Байкал находится в Сибири.', 'Берлин расположен на реке Шпрее.']
+    pipeline = _create_inference_pipeline(config, model_version=model_version)
+    report = measure_inference(pipeline, texts, **config['benchmark'])
+    report['timestamp'] = datetime.now().isoformat()
+    path = _report_path(config, 'benchmark', 'benchmark')
+    path.write_text(json.dumps(_make_serializable(report), ensure_ascii=False, indent=2), encoding='utf-8')
+    print(f"Модель: {report['model_name']}; устройство: {report['device']}")
+    print(f"Среднее: {report['inference']['avg_time_ms']:.2f} мс; "
+          f"median: {report['inference']['median_time_ms']:.2f} мс; "
+          f"p95: {report['inference']['p95_time_ms']:.2f} мс")
+    print(f"Пропускная способность: {report['throughput']:.2f} текстов/сек")
+    print(f"Сэмплированный пик RSS процесса: {report['memory']['cpu_rss_sampled_peak_mb']:.2f} МБ")
+    print(f'Отчёт: {path}')
     if plots:
         from src.visualization.visualizer import NERVisualizer
-        visualizer = NERVisualizer()
-        components = []
-        
-        path = visualizer.plot_benchmark(
-            benchmark_results,
-            save=True,
-            open_result=False
-        )
-        if path:
-            components.append({
-                'type': 'plot',
-                'path': path,
-                'title': 'Производительность инференса',
-                'description': f'Среднее время: {avg_time*1000:.1f} мс, {benchmark_results["throughput"]:.1f} текстов/сек'
-            })
-        
-        if open_result and components:
-            visualizer.create_dashboard(components, open_result=True)
-    
-    return benchmark_results
+        visualizer = NERVisualizer(config['paths']['visualization'])
+        plot = visualizer.plot_benchmark(report)
+        if open_result and plot:
+            visualizer.create_dashboard([{'type':'plot','path':plot,'title':'Производительность'}], open_result=True)
+    return report
 
 
-def main():
-    parser = argparse.ArgumentParser(description="NER MLOps Pipeline")
-    
-    parser.add_argument("-m", "--mode", required=True,
-                        choices=["inference", "update", "summary", "benchmark"])
-    parser.add_argument("-f", "--file", help="Путь к файлу")
-    parser.add_argument("-t", "--text", help="Текст для обработки")
-    
-    parser.add_argument("-l", "--loss", action="store_true", help="Кривая обучения (update)")
-    parser.add_argument("-mt", "--metrics", action="store_true", help="Метрики модели (update, summary)")
-    parser.add_argument("-p", "--plots", action="store_true", help="Распределение сущностей")
-    parser.add_argument("-c", "--compare", action="store_true", help="Сравнение моделей (summary)")
-    parser.add_argument("-b", "--bench", action="store_true", help="График производительности (benchmark)")
-    parser.add_argument("-hi", "--highlight", action="store_true", help="Подсветка сущностей (inference)")
-    parser.add_argument("-o", "--open", action="store_true", help="Открыть результат в браузере")
-    
-    args = parser.parse_args()
-    
-    if args.open:
-        has_viz = any([args.loss, args.metrics, args.plots, args.compare, 
-                       args.bench, args.highlight])
-        if not has_viz:
-            print("Ошибка: -o/--open требует флаг визуализации (-l, -mt, -p, -c, -b, -hi)")
-            sys.exit(1)
-    
-    if args.mode == "inference":
-        if not args.file and not args.text:
-            print("Ошибка: для inference укажите -f/--file или -t/--text")
-            sys.exit(1)
-        
-        if args.text:
-            temp_file = Path("inference_data/temp_text.txt")
-            temp_file.parent.mkdir(parents=True, exist_ok=True)
-            with open(temp_file, 'w', encoding='utf-8') as f:
-                f.write(args.text)
-            file_path = str(temp_file)
-        else:
-            file_path = args.file
-        
-        run_inference(
-            file_path=file_path,
-            highlight=args.highlight,
-            plots=args.plots,
-            open_result=args.open
-        )
-    
-    elif args.mode == "update":
-        run_update(
-            plot_loss=args.loss,
-            plot_metrics=args.metrics,
-            plot_entities=args.plots,
-            open_result=args.open
-        )
-    
-    elif args.mode == "summary":
-        run_summary(
-            plots=args.plots,
-            compare=args.compare,
-            open_result=args.open
-        )
-    
-    elif args.mode == "benchmark":
-        run_benchmark(
-            file_path=args.file,
-            plots=args.bench,
-            open_result=args.open
-        )
+def main(argv=None):
+    parser = argparse.ArgumentParser(description='NER experiment pipeline')
+    parser.add_argument('-m', '--mode', required=True, choices=[
+        'type-statistics','prepare','train','update','inference','summary','benchmark','evaluate'])
+    parser.add_argument('--dataset', choices=['nerel','nerel-bio'], help='Профиль локального датасета')
+    parser.add_argument('--config', help='Путь к YAML-конфигурации')
+    parser.add_argument('--device', choices=['auto','cpu','cuda'])
+    parser.add_argument('--model-version', help='ID зарегистрированной модели для inference/benchmark/evaluate')
+    parser.add_argument('--dataset-version', help='ID версии данных для train/evaluate')
+    parser.add_argument('--split', choices=['dev','test'], help='Обязательный split для evaluate')
+    source = parser.add_mutually_exclusive_group()
+    source.add_argument('-f','--file', help='Входной файл, путь относительно текущей папки')
+    source.add_argument('-t','--text', help='Один текст для inference, без временного файла')
+    parser.add_argument('-l','--loss', action='store_true')
+    parser.add_argument('-mt','--metrics', action='store_true')
+    parser.add_argument('-p','--plots', action='store_true')
+    parser.add_argument('-c','--compare', action='store_true')
+    parser.add_argument('-b','--bench', action='store_true')
+    parser.add_argument('-hi','--highlight', action='store_true')
+    parser.add_argument('-o','--open', action='store_true')
+    parser.add_argument('--warmup', type=int, help='Число прогревочных проходов benchmark')
+    parser.add_argument('--repeats', type=int, help='Число измеряемых проходов benchmark')
+    args = parser.parse_args(argv)
+    allowed = {
+        'model_version': {'inference','benchmark','evaluate'},
+        'dataset': {'type-statistics','prepare','train','update','evaluate'},
+        'loss': {'train','update'}, 'metrics': {'train','update','summary','evaluate'},
+        'plots': {'train','update','inference','summary'}, 'compare': {'summary'},
+        'bench': {'benchmark'}, 'highlight': {'inference'},
+        'device': {'train','update','inference','benchmark','evaluate'},
+        'file': {'inference','benchmark'}, 'text': {'inference'},
+        'split': {'evaluate'}, 'dataset_version': {'train','evaluate'}, 'warmup': {'benchmark'}, 'repeats': {'benchmark'}}
+    for flag, modes in allowed.items():
+        value = getattr(args, flag)
+        if value is not None and value is not False and args.mode not in modes:
+            parser.error(f'--{flag.replace("_", "-")} не поддерживается в режиме {args.mode}')
+    if args.mode in ('train','evaluate') and not args.dataset_version:
+        parser.error(f'для {args.mode} требуется --dataset-version')
+    if args.mode == 'evaluate' and args.split is None:
+        parser.error('для evaluate требуется --split dev или --split test')
+    if args.mode == 'inference' and args.file is None and args.text is None:
+        parser.error('для inference требуется --file или --text')
+    if args.open and not any([args.loss,args.metrics,args.plots,args.compare,args.bench,args.highlight]):
+        parser.error('--open требует подходящего режиму флага визуализации')
+    try:
+        config = load_config(args.config, dataset=args.dataset)
+        if config['model']['architecture'] == 'gliner' and args.mode in ('train','update'):
+            raise ValueError('GLiNER используется без дообучения; train/update недоступны')
+        if args.mode in ('train','evaluate') and args.dataset is None:
+            from src.config import config_from_dataset_manifest
+            config = config_from_dataset_manifest(config, args.dataset_version)
+        if args.device is not None:
+            config['device'] = args.device
+        if args.mode == 'evaluate':
+            return run_evaluate(args.dataset_version, args.split, config=config,
+                plot_metrics=args.metrics, open_result=args.open, model_version=args.model_version)
+        if args.mode == 'inference':
+            return run_inference(file_path=args.file, text=args.text, config=config,
+                highlight=args.highlight, plots=args.plots, open_result=args.open, model_version=args.model_version)
+        if args.mode == 'type-statistics':
+            from src.pipeline import calculate_type_statistics
+            return calculate_type_statistics(config)
+        if args.mode == 'prepare':
+            return run_prepare(config)
+        if args.mode == 'train':
+            return run_train(args.dataset_version, config=config, plot_loss=args.loss,
+                plot_metrics=args.metrics, plot_entities=args.plots, open_result=args.open)
+        if args.mode == 'update':
+            return run_update(config=config, plot_loss=args.loss, plot_metrics=args.metrics,
+                plot_entities=args.plots, open_result=args.open)
+        if args.mode == 'summary':
+            return run_summary(config=config, plots=args.plots, compare=args.compare,
+                plot_metrics=args.metrics, open_result=args.open)
+        if args.mode == 'benchmark':
+            return run_benchmark(config=config, file_path=args.file, plots=args.bench,
+                open_result=args.open, warmup=args.warmup, repeats=args.repeats, model_version=args.model_version)
+    except (ValueError, OSError, RuntimeError) as error:
+        parser.exit(2, f'Ошибка: {error}\n')
 
-if __name__ == "__main__":
+
+if __name__ == '__main__':
     main()

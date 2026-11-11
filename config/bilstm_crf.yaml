@@ -1,0 +1,45 @@
+dataset: nerel
+seed: 42
+device: auto
+model:
+  architecture: bilstm_crf
+  name: bilstm-crf
+  tokenizer_name: DeepPavlov/rubert-base-cased
+  parameters:
+    embedding_dim: 128
+    hidden_size: 128
+    num_layers: 1
+    dropout: 0.2
+training:
+  batch_size: 16
+  learning_rate: 0.001
+  num_epochs: 30
+  warmup_steps: 0
+  weight_decay: 0.01
+  logging_steps: 10
+data:
+  batch_size: 32
+  max_seq_length: 512
+annotation_policy:
+  overlap: longest_first
+  same_span_priority: train_frequency_ascending
+  final_tie: alphabetical
+  discontinuous: exclude
+evaluation:
+  primary_metric: macro_f1
+  match: exact_span_and_type
+paths:
+  raw: data/raw
+  processed: data/processed
+  prepared: data/prepared
+  models: data/models
+  predictions: data/predictions
+  reports: reports
+  visualization: reports/visualization
+visualization:
+  output_format: html
+  save_plots: true
+  max_examples_in_report: 5
+benchmark:
+  warmup_runs: 2
+  repeats: 5

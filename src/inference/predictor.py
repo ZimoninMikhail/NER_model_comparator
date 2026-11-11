@@ -4,7 +4,10 @@
 
 import torch
 from typing import List, Dict, Any, Tuple
-from transformers import AutoTokenizer
+from src.device import resolve_device
+from src.models.adapter import predict_token_labels, token_mask_from_samples
+from src.data_preparation.bio_decoder import decode_bio
+from src.data_preparation.document_chunker import chunk_document
 
 
 class NERPredictor:
@@ -17,7 +20,7 @@ class NERPredictor:
         model,
         tokenizer,
         id2label: Dict[int, str],
-        device: str = "cpu",
+        device: str = "auto",
         max_length: int = 512
     ):
         """
@@ -31,10 +34,10 @@ class NERPredictor:
         self.model = model
         self.tokenizer = tokenizer
         self.id2label = id2label
-        self.device = device
+        self.device = resolve_device(device)
         self.max_length = max_length
         
-        self.model.to(device)
+        self.model.to(self.device)
         self.model.eval()
     
     def predict_single(
@@ -52,29 +55,18 @@ class NERPredictor:
         Returns:
             Список найденных сущностей
         """
-        encoding = self.tokenizer(
-            text,
-            max_length=self.max_length,
-            truncation=True,
-            return_tensors="pt",
-            return_offsets_mapping=True
-        )
-        
-        offset_mapping = encoding.pop('offset_mapping')[0].numpy()
-        input_ids = encoding['input_ids'].to(self.device)
-        attention_mask = encoding['attention_mask'].to(self.device)
-        
-        with torch.no_grad():
-            outputs = self.model(input_ids, attention_mask=attention_mask)
-            predictions = torch.argmax(outputs.logits, dim=2)[0].cpu().numpy()
-        
-        entities = self._decode_predictions(
-            predictions, 
-            offset_mapping, 
-            text, 
-            return_spans
-        )
-        
+        chunks = chunk_document(text, self.tokenizer, self.max_length)
+        entities = []
+        for chunk in chunks:
+            input_ids = torch.tensor([chunk['input_ids']], dtype=torch.long, device=self.device)
+            attention_mask = torch.tensor([chunk['attention_mask']], dtype=torch.long, device=self.device)
+            with torch.no_grad():
+                mask = token_mask_from_samples([{'offset_mapping':chunk['offset_mapping'], 'text':text}],
+                                               len(chunk['input_ids']), self.device)
+                predictions = predict_token_labels(self.model, input_ids, attention_mask, mask)[0].cpu().numpy()
+            entities.extend(self._decode_predictions(predictions, chunk['offset_mapping'],
+                                                      text, return_spans))
+
         return entities
     
     def predict_batch(
@@ -108,62 +100,5 @@ class NERPredictor:
         """
         Декодирует предсказания в сущности.
         """
-        entities = []
-        current_entity = None
-        
-        for i, (pred_id, (start, end)) in enumerate(zip(predictions, offset_mapping)):
-            if start == 0 and end == 0:
-                continue
-            
-            label = self.id2label.get(pred_id, 'O')
-            
-            if label.startswith('B-'):
-                if current_entity:
-                    entities.append(current_entity)
-                entity_type = label[2:]
-                current_entity = {
-                    'type': entity_type,
-                    'start': start,
-                    'end': end,
-                    'text': text[start:end]
-                }
-                
-            elif label.startswith('I-') and current_entity:
-                current_entity['end'] = end
-                current_entity['text'] = text[current_entity['start']:end]
-                
-            else:
-                if current_entity:
-                    entities.append(current_entity)
-                    current_entity = None
-        
-        if current_entity:
-            entities.append(current_entity)
-        
-        merged_entities = self._merge_entities(entities)
-        
-        if not return_spans:
-            for e in merged_entities:
-                del e['start']
-                del e['end']
-        
-        return merged_entities
-    
-    def _merge_entities(self, entities: List[Dict]) -> List[Dict]:
-        """Объединяет сущности из нескольких токенов."""
-        if not entities:
-            return []
-        
-        merged = []
-        current = entities[0].copy()
-        
-        for i in range(1, len(entities)):
-            if entities[i]['type'] == current['type'] and entities[i]['start'] == current['end']:
-                current['end'] = entities[i]['end']
-                current['text'] = current['text'] + entities[i]['text']
-            else:
-                merged.append(current)
-                current = entities[i].copy()
-        
-        merged.append(current)
-        return merged
+        return decode_bio(predictions, offset_mapping, text,
+                          id2label=self.id2label, return_spans=return_spans)

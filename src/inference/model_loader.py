@@ -1,72 +1,45 @@
-"""
-Модуль для загрузки модели из реестра.
-"""
-
+"""Локальная загрузка зарегистрированных моделей, без обращения к Hub."""
+import json
 from pathlib import Path
-from typing import Optional, Dict, Any
-from transformers import AutoModelForTokenClassification
+from src.models.adapter import load_local_model
 
 
 class ModelLoader:
-    """
-    Загрузчик моделей из реестра версий.
-    """
-    
-    def __init__(self, models_dir: str = "data/models"):
-        self.models_dir = Path(models_dir)
-        self.registry_path = self.models_dir / "registry.json"
-        self._registry = None
-        self._load_registry()
-    
-    def _load_registry(self):
-        """Загружает реестр моделей."""
-        import json
-        if self.registry_path.exists():
-            with open(self.registry_path, 'r') as f:
-                self._registry = json.load(f)
-        else:
-            self._registry = {'versions': [], 'latest': None}
-    
-    def get_latest_model_path(self) -> Optional[Path]:
-        """Возвращает путь к последней модели."""
-        latest_version = self._registry.get('latest')
-        if latest_version:
-            for v in self._registry['versions']:
-                if v['version'] == latest_version:
-                    return Path(v['path'])
-        return None
-    
-    def get_model_by_version(self, version: str) -> Optional[Path]:
-        """Возвращает путь к модели по версии."""
-        for v in self._registry['versions']:
-            if v['version'] == version:
-                return Path(v['path'])
-        return None
-    
-    def load_model(self, version: Optional[str] = None):
-        """
-        Загружает модель.
-        
-        Args:
-            version: Версия модели (если None, загружается последняя)
-            
-        Returns:
-            model, id2label
-        """
-        if version:
-            model_path = self.get_model_by_version(version)
-        else:
-            model_path = self.get_latest_model_path()
-        
-        if not model_path:
-            raise ValueError("Модель не найдена. Сначала обучите модель.")
-        
-        print(f"Загрузка модели: {model_path}")
-        model = AutoModelForTokenClassification.from_pretrained(model_path)
-        id2label = model.config.id2label
-        
-        return model, id2label
-    
-    def list_versions(self) -> list:
-        """Возвращает список всех версий."""
-        return [v['version'] for v in self._registry['versions']]
+    def __init__(self, models_dir='data/models'):
+        self.models_dir = Path(models_dir).resolve()
+        self.registry_path = self.models_dir / 'registry.json'
+        self._registry = json.loads(self.registry_path.read_text(encoding='utf-8')) \
+            if self.registry_path.is_file() else {'versions': [], 'latest': None}
+
+    def get_model_path(self, version=None):
+        version = version if version is not None else self._registry.get('latest')
+        entry = next((entry for entry in self._registry['versions'] if entry['version'] == version), None)
+        if entry is None:
+            raise ValueError('Модель не найдена в реестре. Укажите версию или сначала обучите модель')
+        # Папка рядом с реестром позволяет переносить весь комплект models.
+        if Path(version).name != version or version in ('.','..'):
+            raise ValueError('Некорректный ID версии модели')
+        local = self.models_dir / version
+        if local.is_dir():
+            return local.resolve()
+        registered = Path(entry['path']).expanduser()
+        candidates = [registered] if registered.is_absolute() else [self.models_dir / registered, self.models_dir.parent.parent / registered]
+        for path in candidates:
+            if path.is_dir():
+                return path.resolve()
+        raise ValueError(f'Локальная папка версии {version} не найдена')
+
+    def get_latest_model_path(self):
+        return self.get_model_path()
+
+    def get_model_by_version(self, version):
+        return self.get_model_path(version)
+
+    def load_model(self, version=None):
+        path = self.get_model_path(version)
+        print(f'Загрузка модели: {path}')
+        model = load_local_model(path)
+        return model, model.config.id2label
+
+    def list_versions(self):
+        return [entry['version'] for entry in self._registry['versions']]

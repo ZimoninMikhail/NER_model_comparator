@@ -1,0 +1,71 @@
+dataset: nerel
+seed: 42
+device: auto
+model:
+  architecture: gliner
+  name: data/pretrained/gliner_multi-v2.1
+  threshold: 0.5
+  type_mapping:
+    AGE: age
+    AWARD: award
+    CITY: city
+    COUNTRY: country
+    CRIME: crime
+    DATE: date
+    DISEASE: disease
+    DISTRICT: district
+    EVENT: event
+    FACILITY: facility
+    FAMILY: family
+    IDEOLOGY: ideology
+    LANGUAGE: language
+    LAW: law
+    LOCATION: location
+    MONEY: money
+    NATIONALITY: nationality
+    NUMBER: number
+    ORDINAL: ordinal
+    ORGANIZATION: organization
+    PENALTY: penalty
+    PERCENT: percent
+    PERSON: person
+    PRODUCT: product
+    PROFESSION: profession
+    RELIGION: religion
+    STATE_OR_PROVINCE: state or province
+    TIME: time
+    WORK_OF_ART: work of art
+# Общий шаблон; для GLiNER режимы train/update запрещены.
+training:
+  batch_size: 2
+  learning_rate: 2.0e-05
+  num_epochs: 3
+  warmup_steps: 500
+  weight_decay: 0.01
+  logging_steps: 100
+data:
+  batch_size: 32
+  max_seq_length: 512
+annotation_policy:
+  overlap: longest_first
+  same_span_priority: train_frequency_ascending
+  final_tie: alphabetical
+  discontinuous: exclude
+evaluation:
+  primary_metric: macro_f1
+  match: exact_span_and_type
+paths:
+  raw: data/raw
+  processed: data/processed
+  prepared: data/prepared
+  models: data/models
+  predictions: data/predictions
+  reports: reports
+  visualization: reports/visualization
+visualization:
+  output_format: html
+  save_plots: true
+  max_examples_in_report: 5
+benchmark:
+  warmup_runs: 2
+  repeats: 5

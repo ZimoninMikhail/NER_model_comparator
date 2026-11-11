@@ -29,7 +29,8 @@ class StreamingDataLoader:
         self, 
         batch_size: int = 32, 
         dataset_name: str = "iluvvatar/NEREL", 
-        shuffle: bool = True
+        shuffle: bool = True,
+        revision: Optional[str] = None
     ):
         """
         Args:
@@ -37,6 +38,9 @@ class StreamingDataLoader:
             dataset_name: Название датасета на Hugging Face
             shuffle: перемешивать ли документы перед разделением на батчи
         """
+        if type(batch_size) is not int or batch_size <= 0:
+            raise ValueError("batch_size должен быть положительным целым числом")
+        self.revision = revision
         self.batch_size = batch_size
         self.dataset_name = dataset_name
         self.full_dataset = None
@@ -59,7 +63,7 @@ class StreamingDataLoader:
     def load_train(self) -> None:
         """Загружает тренировочный сплит. Перемешивает при соответствующем флаге"""
         if self.full_dataset is None:
-            self.full_dataset = load_dataset(self.dataset_name, trust_remote_code=True)
+            self.full_dataset = load_dataset(self.dataset_name, trust_remote_code=True, revision=self.revision)
 
         self.dataset = self.full_dataset['train']
         self.total_docs = len(self.dataset)
@@ -77,7 +81,7 @@ class StreamingDataLoader:
         Перемешивает при соответствующем флаге
         """
         if self.full_dataset is None:
-            self.full_dataset = load_dataset(self.dataset_name, trust_remote_code=True)
+            self.full_dataset = load_dataset(self.dataset_name, trust_remote_code=True, revision=self.revision)
 
         self.dataset = self.full_dataset['dev']
         self.total_docs = len(self.dataset)
@@ -92,7 +96,7 @@ class StreamingDataLoader:
     def load_test(self) -> None:
         """Загружает тестовый сплит. НЕ перемешивает"""
         if self.full_dataset is None:
-            self.full_dataset = load_dataset(self.dataset_name, trust_remote_code=True)
+            self.full_dataset = load_dataset(self.dataset_name, trust_remote_code=True, revision=self.revision)
             
         self.dataset = self.full_dataset['test']
         self.total_docs = len(self.dataset)
@@ -135,7 +139,9 @@ class StreamingDataLoader:
             batch.append({
                 'text': doc['text'],
                 'entities': doc['entities'],
-                'doc_id': doc_idx,
+                'doc_id': f'{self.current_split}:{doc_idx}',
+                'source_doc_id': doc.get('id', doc_idx),
+                'split': self.current_split,
                 'batch_id': self.batch_count
             })
         
